@@ -180,8 +180,6 @@ impl Tag {
             }
         }
 
-        // println!("{:#?}", tag.items);
-
         Ok(tag)
     }
 }

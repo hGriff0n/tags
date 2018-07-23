@@ -2,6 +2,7 @@
 extern crate byteorder;
 
 mod formats;
+
 use formats::*;
 
 use std::io;
