@@ -1,7 +1,10 @@
 
 use super::tag;
 
+use std::cmp::min;
+use std::convert;
 use std::io::{Error, ErrorKind};
+use std::str;
 
 use byteorder::{BigEndian, ByteOrder};
 
@@ -24,7 +27,7 @@ impl Frame {
             header.size = if buf.len() < 6 {
                 0
             } else {
-                BigEndian::read_u32(&buf[3..6]) as u64
+                BigEndian::read_u32(&buf[3..7]) as u64
             }
 
 
@@ -141,8 +144,12 @@ impl Frame {
                     return Err(Error::new(ErrorKind::InvalidData, "Text frame did not contain enough data"));
                 }
 
-                let encoding = data[0];
-                let alignment = if encoding >= 0 { 1 } else { 2 };
+                let encoding = StringType::from(data[0]);
+                let alignment = match encoding {
+                    StringType::Latin1 | StringType::UTF8 => 1,
+                    _ => 2
+                };
+
                 let mut len = data.len() - 1;
 
                 while len > 0 && data[len] == 0 {
@@ -153,7 +160,15 @@ impl Frame {
                     len += 1;
                 }
 
-                (SubClass::Text(from_ascii(&data[..len])), len + 1)
+                let text = match encoding {
+                    StringType::Latin1 => from_ascii(&data[..len]),
+                    _ => match str::from_utf8(&data[..len]) {
+                        Ok(s) => s.to_string(),
+                        Err(_) => return Err(Error::new(ErrorKind::InvalidData, "Failed to convert string from utf8"))
+                    }
+                };
+
+                (SubClass::Text(text), len + 1)
             },
 
             // Comments
@@ -222,8 +237,31 @@ impl Frame {
             return Err(Error::new(ErrorKind::Other, "Compressed frames not currently supported"));
         }
 
-        let data = buf[offset..(offset+len)].to_vec();
+        let end = min(buf.len() - 1, offset+len);
+        let data = buf[offset..end].to_vec();
         Ok(data)
+    }
+}
+
+enum StringType {
+    Latin1 = 0,
+    UTF16 = 1,
+    UTF16be = 2,
+    UTF8 = 3,
+    UTF16le = 4,
+    Invalid
+}
+
+impl From<u8> for StringType {
+    fn from(val: u8) -> Self {
+        match val {
+            0 => StringType::Latin1,
+            1 => StringType::UTF16,
+            2 => StringType::UTF16be,
+            3 => StringType::UTF8,
+            4 => StringType::UTF16le,
+            _ => StringType::Invalid
+        }
     }
 }
 
