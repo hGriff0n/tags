@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom};
 use std::mem;
+use std::rc;
 
 use byteorder::{BigEndian, ByteOrder};
 
@@ -18,21 +19,21 @@ pub struct Tag {
 
 impl meta::Tag for Tag {
     fn title(&self) -> Option<String> {
-        if let Some(frame::SubClass::Text(title)) = self.frame_map.get("TIT2") {
+        if let Some(frame::SubClass::Text(title, _)) = self.frame_map.get("TIT2") {
             Some(title.to_string())
         } else {
             None
         }
     }
     fn artist(&self) -> Option<String> {
-        if let Some(frame::SubClass::Text(artist)) = self.frame_map.get("TPE1") {
+        if let Some(frame::SubClass::Text(artist, _)) = self.frame_map.get("TPE1") {
             Some(artist.to_string())
         } else {
             None
         }
     }
     fn album(&self) -> Option<String> {
-        if let Some(frame::SubClass::Text(album)) = self.frame_map.get("TALB") {
+        if let Some(frame::SubClass::Text(album, _)) = self.frame_map.get("TALB") {
             Some(album.to_string())
         } else {
             None
@@ -46,7 +47,7 @@ impl meta::Tag for Tag {
         }
     }
     fn comment(&self) -> Option<String> {
-        if let Some(frame::SubClass::Text(comment)) = self.frame_map.get("COMM") {
+        if let Some(frame::SubClass::Text(comment, _)) = self.frame_map.get("COMM") {
             Some(comment.to_string())
         } else {
             None
@@ -62,7 +63,7 @@ impl meta::Tag for Tag {
 
     // TODO: This needs to be built up when I construct the tag
     fn genre(&self) -> Option<String> {
-        if let Some(frame::SubClass::Text(genre)) = self.frame_map.get("TCON") {
+        if let Some(frame::SubClass::Text(genre, _)) = self.frame_map.get("TCON") {
             Some(genre.to_string())
         } else {
             None
@@ -71,23 +72,77 @@ impl meta::Tag for Tag {
 }
 
 impl Tag {
+    // TODO: Improve the process for unifying id3v1 and id3v2 tags
+    pub fn unify(tags: Vec<rc::Rc<Self>>) -> Self {
+        let mut ret_tag = Self::default();
+
+        for tag in tags {
+            for (key, value) in &tag.frame_map {
+
+                use std::collections::hash_map::Entry::*;
+                match ret_tag.frame_map.entry(key.to_string()) {
+                    // TODO: Temporary workaround for bad utf16 parsing (see frame.rs)
+                    Occupied(mut ent) => {
+                        match ent.get() {
+                            frame::SubClass::Text(_, frame::StringType::UTF16) => { ent.insert(value.clone()); },
+                            _ => ()
+                        };
+                    },
+                    Vacant(ent) => { ent.insert(value.clone()); },
+                };
+            }
+        }
+
+        ret_tag
+    }
+
     pub fn id3v2_from_file(file: &mut fs::File, offset: u64) -> Result<Self, Error> {
         file.seek(SeekFrom::Start(offset))?;
 
         let mut header = vec![0; 10];
         file.read_exact(&mut header)?;
-        let header = parse_tag_header(&header)?;
 
+        let header = parse_tag_header(&header)?;
         if header.size != 0 {
             let mut buf = vec![0; header.size as usize];
             file.read_exact(&mut buf)?;
-            Tag::from_buffer(&mut buf, &header)
+            return Tag::from_buffer(&mut buf, &header);
 
-        } else {
-            Err(Error::new(ErrorKind::InvalidData, "Tags must contain at least 1 frame"))
         }
 
+        // TODO: This could only be causing us to "skip" some stuff, not fail at parsing
         // NOTE: Taglib has some stuff about ignoring duplicate flags (I'm ignoring that for now)
+
+        Err(Error::new(ErrorKind::InvalidData, "Tags must contain at least 1 frame"))
+    }
+
+    pub fn id3v1_from_file(file: &mut fs::File, offset: u64) -> Result<Self, Error> {
+        file.seek(SeekFrom::Start(offset))?;
+
+        let mut block = vec![0; 128];
+        file.read_exact(&mut block)?;
+
+        let mut tag = Tag{ frame_map: HashMap::new() };
+        // from_ascii(&block[3..33]);
+
+        use self::frame::StringType;
+
+        tag.frame_map.insert("TIT2".to_string(), frame::SubClass::Text(id3::from_ascii(&block[3..33]), StringType::UTF8));
+        tag.frame_map.insert("TPE1".to_string(), frame::SubClass::Text(id3::from_ascii(&block[33..63]), StringType::UTF8));
+        tag.frame_map.insert("TALB".to_string(), frame::SubClass::Text(id3::from_ascii(&block[63..93]), StringType::UTF8));
+        // tag.frame_map.insert("TDRC".to_string(), frame::SubClass::Uint(&block[93..97]));
+
+        if block[125] == 0 && block[126] != 0 {
+            tag.frame_map.insert("COMM".to_string(), frame::SubClass::Text(id3::from_ascii(&block[97..125]), StringType::UTF8));
+            tag.frame_map.insert("TRCK".to_string(), frame::SubClass::Uint(block[126] as u64));
+        } else {
+            tag.frame_map.insert("COMM".to_string(), frame::SubClass::Text(id3::from_ascii(&block[97..127]), StringType::UTF8));
+        }
+
+        // tag.frame_map.insert("TCON".to_string(), frame::SubClass::Uint(block[127] as u64));
+
+        Ok(tag)
+
     }
 
     fn from_buffer(buf: &mut Vec<u8>, header: &TagHeader) -> Result<Self, Error> {
@@ -127,7 +182,7 @@ impl Tag {
                 break;
             }
 
-            let mut new_frame = match frame::Frame::from_buffer(&mut buf[pos..], pos, buf_end, &header)? {
+            let mut new_frame = match frame::Frame::from_buffer(&mut buf[pos..], &header)? {
                 Some(frame) => frame,
                 None => break
             };
@@ -191,7 +246,7 @@ fn parse_tag_header(buf: &Vec<u8>) -> Result<TagHeader, Error> {
     Ok(TagHeader{
         major_version: buf[3],
         rev_num: buf[4],
-        size: synch::int_from_buf(&buf[6..10]).into(),
+        size: synch::int_from_buf(&buf[6..10]) as u64,
         unsynch: buf[5] & 0b10000000 != 0,
         extended: buf[5] & 0b1000000 != 0,
         experimental: buf[5] & 0b100000 != 0,
@@ -204,33 +259,34 @@ fn parse_tag_header(buf: &Vec<u8>) -> Result<TagHeader, Error> {
 // TODO: Move this to a separate (utility?) file
 pub(crate) mod synch {
     use byteorder::{BigEndian, ByteOrder};
+    use std::cmp::min;
 
     // taglib:
     pub fn int_from_buf(buf: &[u8]) -> u32 {
         let mut sum = 0 as u32;
-        let mut is_sync_safe = true;
-        let mut len = buf.len() - 1;
+        let mut not_sync_safe = false;
+        let len = min(buf.len() - 1, 3);
 
-        for byte in buf {
-            if byte & 0x80 != 0x80 {
-                if let Some(val) = ((byte & 0x7f) as u32).checked_shl((len * 7) as u32) {
-                    sum = sum | val;
-                    if len == 0 {
-                        break;
-                    } else {
-                        len -= 1;
-                        continue;
-                    }
-                }
+        for i in 0..(len+1) {
+            let byte = buf[i];
+            if byte & 0x80 != 0 {
+                not_sync_safe = true;
+                break;
             }
 
-            is_sync_safe = false;
-            break;
+            let addition = (buf[i] & 0x7f) as u32;
+            sum = sum | (addition << ((len - i) * 7));
         }
 
         // Assume that the tag was written by software which doesn't maintain "synch" safety
-        if !is_sync_safe {
-            sum = BigEndian::read_u32(buf);
+        if not_sync_safe {
+            if buf.len() >= 4 {
+                sum = BigEndian::read_u32(buf);
+            } else {
+                let mut buf = buf.iter().cloned().collect::<Vec<u8>>();
+                buf.resize(4, 0);
+                sum = BigEndian::read_u32(&buf);
+            }
         }
 
         sum
@@ -262,4 +318,24 @@ pub(crate) mod synch {
 
 fn sizeof_footer() -> usize {
     10
+}
+
+
+// This is a duplicate of a function declared in m4a.rs and frame.rs
+mod id3 {
+    pub fn from_ascii(buf: &[u8]) -> String {
+        let idx =
+            if let Some(idx) = buf.iter().rposition(|x| (*x as char).is_alphanumeric()) {
+                idx + 1
+            } else {
+                buf.len()
+            };
+
+        let mut s = "".to_string();
+        for c in &buf[0..idx] {
+            s.push(*c as char);
+        }
+
+        s
+    }
 }

@@ -18,18 +18,20 @@ impl File {
         let mut file = fs::File::open(path)?;
 
         use self::Id3Version::*;
-        if let (ID3v2, location) = find_mpeg_tag(&mut file)? {
-            Ok(File{ tag: rc::Rc::new(tag::Tag::id3v2_from_file(&mut file, location)?) })
-        } else {
-            Err(Error::new(ErrorKind::Other, "Non-id3v2 tags are not supported"))
+        let mut tags = Vec::new();
+        for (tag_type, location) in find_mpeg_tags(&mut file)? {
+            tags.push(match tag_type {
+                ID3v2 => rc::Rc::new(tag::Tag::id3v2_from_file(&mut file, location)?),
+                ID3v1 => rc::Rc::new(tag::Tag::id3v1_from_file(&mut file, location)?),
+                APE => rc::Rc::new(tag::Tag::default()),
+            });
         }
-        // let tag = match find_mpeg_tag(&mut file)? {
-        //     (ID3v2, location) => Tag::from_id3v2(&mut file, location)?,
-        //     (ID3v1, location) => Tag::from_id3v1(&mut file, location)?,
-        //     (APE, location) => Tag::from_ape(&mut file, location)?,
-        // };
 
-        // Ok(File{ tag: rc::Rc::new(tag) })
+        if tags.len() == 0 {
+            Err(Error::new(ErrorKind::Other, "Non-id3v2 tags are not supported"))
+        } else {
+            Ok(File{ tag: rc::Rc::new(tag::Tag::unify(tags)) })
+        }
     }
 }
 
@@ -45,21 +47,27 @@ impl meta::File for File {
     }
 }
 
-fn find_mpeg_tag(file: &mut fs::File) -> Result<(Id3Version, u64), Error> {
+fn find_mpeg_tags(file: &mut fs::File) -> Result<Vec<(Id3Version, u64)>, Error> {
+    let mut tags = Vec::new();
+
     // Are all of the tags possible on one file ?
     if let Some(location) = find_id3v2(file)? {
-        return Ok((Id3Version::ID3v2, location));
+        tags.push((Id3Version::ID3v2, location));
     }
 
     if let Some(location) = find_id3v1(file)? {
-        return Ok((Id3Version::ID3v1, location));
+        tags.push((Id3Version::ID3v1, location));
     }
 
     if let Some(location) = find_ape(file)? {
-        return Ok((Id3Version::APE, location));
+        tags.push((Id3Version::APE, location));
     }
 
-    Err(Error::new(ErrorKind::InvalidData, "Could not find mpeg tag location"))
+    if tags.len() == 0 {
+        Err(Error::new(ErrorKind::InvalidData, "Could not find mpeg tag location"))
+    } else {
+        Ok(tags)
+    }
 }
 
 fn find_id3v2(file: &mut fs::File) -> Result<Option<u64>, Error> {
@@ -89,7 +97,17 @@ fn find_id3v2(file: &mut fs::File) -> Result<Option<u64>, Error> {
     // return tagOffset;
 }
 
-fn find_id3v1(_file: &mut fs::File) -> Result<Option<u64>, Error> {
+fn find_id3v1(file: &mut fs::File) -> Result<Option<u64>, Error> {
+    let loc = file.seek(SeekFrom::End(-128))?;
+
+    let header_id = vec!['T' as u8, 'A' as u8, 'G' as u8];
+    let mut buf = vec![0 as u8; header_id.len()];
+
+    file.read_exact(&mut buf)?;
+    if buf == header_id {
+        return Ok(Some(loc));
+    }
+
     Ok(None)
 }
 

@@ -27,7 +27,8 @@ impl Frame {
             header.size = if buf.len() < 6 {
                 0
             } else {
-                BigEndian::read_u32(&buf[3..7]) as u64
+                let tmp = [buf[3], buf[4], buf[5], 0];
+                BigEndian::read_u32(&tmp) as u64
             }
 
 
@@ -62,12 +63,13 @@ impl Frame {
                 // itunes hacks
                 // // iTunes writes v2.4 tags with v2.3-like frame sizes
                 if header.size > 127 {
-                //     if(!isValidFrameID(data.mid(d->frameSize + 10, 4))) {
-                //         unsigned int uintSize = data.toUInt(4U);
-                //         if(isValidFrameID(data.mid(uintSize + 10, 4))) {
-                //         d->frameSize = uintSize;
-                //         }
-                //     }
+                    // let frame_start = (header.size + 10) as usize;
+                    // if !valid_frame_id(&buf[frame_start..(frame_start + 4)]) {
+                    //     let size = BigEndian::read_u32(&buf[4..8]) as usize;
+                    //     if valid_frame_id(&buf[(size+10)..(size+14)]) {
+                    //         header.size = size as u64;
+                    //     }
+                    // }
                 }
 
                 header.tag_alter_preservation = buf[8] & 0b1000000 != 0;
@@ -87,12 +89,12 @@ impl Frame {
 
     // TODO: This doesn't consider the "buffer" start may be at a different spot in the vector (doesn't account for pos)
     // TODO: This doesn't return the size of the frame data in the frame struct (which is expected by the calling code)
-    pub(crate) fn from_buffer(buf: &mut [u8], _pos: usize, _len: usize, header: &tag::TagHeader) -> Result<Option<Frame>, Error> {
+    pub(crate) fn from_buffer(buf: &mut [u8], header: &tag::TagHeader) -> Result<Option<Frame>, Error> {
         let version = header.major_version;
         let mut frame_header = Frame::get_header(buf, version)?;
 
         if frame_header.frame_id.len() != (if version < 3 { 3 } else { 4 })
-            || frame_header.size <= if frame_header.data_length_indicator { 4 } else { 0 }
+            || frame_header.size <= (if frame_header.data_length_indicator { 4 } else { 0 })
             || frame_header.size as usize > buf.len()
         {
             // return Err(Error::new(ErrorKind::InvalidData, "Invalid frame length"));
@@ -129,103 +131,142 @@ impl Frame {
             return Err(Error::new(ErrorKind::Other, "Encrypted frames not currently supported"));
         }
 
+        let mut frame = Frame{
+            size: frame_header.size as usize,
+            frame_id: frame_header.frame_id.clone(),
+            sub: SubClass::Unknown
+        };
         if !frame_header.update(version) {
-            return Err(Error::new(ErrorKind::InvalidData, "Failed to update frame header"));
+            return Ok(Some(frame))
         }
 
         // Extract the frame subclass information
         let first_char = frame_header.frame_id.chars().next().unwrap();
-        let (subclass, size) = match frame_header.frame_id.as_str() {
+        frame.sub = match frame_header.frame_id.as_str() {
             // Text frames
             tag if first_char == 'T' || tag == "WFED" || tag == "MVNM" || tag == "MVIN" => {
                 let data = Frame::field_data(buf, &frame_header)?;
 
                 if data.len() < 2 {
-                    return Err(Error::new(ErrorKind::InvalidData, "Text frame did not contain enough data"));
-                }
+                    SubClass::Text("".to_string(), StringType::UTF16)      // There's nothing there to parse
 
-                let encoding = StringType::from(data[0]);
-                let alignment = match encoding {
-                    StringType::Latin1 | StringType::UTF8 => 1,
-                    _ => 2
-                };
+                } else {
+                    let encoding = StringType::from(data[0]);
+                    let alignment = match encoding {
+                        StringType::Latin1 | StringType::UTF8 => 1,
+                        _ => 2
+                    };
 
-                let mut len = data.len() - 1;
+                    let mut len = data.len() - 1;
 
-                while len > 0 && data[len] == 0 {
-                    len -= 1;
-                }
-
-                while len % alignment != 0 {
-                    len += 1;
-                }
-
-                let text = match encoding {
-                    StringType::Latin1 => from_ascii(&data[..len]),
-                    _ => match str::from_utf8(&data[..len]) {
-                        Ok(s) => s.to_string(),
-                        Err(_) => return Err(Error::new(ErrorKind::InvalidData, "Failed to convert string from utf8"))
+                    while len > 0 && data[len] == 0 {
+                        len -= 1;
                     }
-                };
 
-                (SubClass::Text(text), len + 1)
+                    while len % alignment != 0 {
+                        len += 1;
+                    }
+
+                    // TODO: I don't split the data based on a text delimeter
+                    // taglib:textidentificationframe.cpp:211
+
+                    let end = min(len + 1, data.len());
+                    let text = match encoding {
+                        StringType::Latin1 => from_ascii(&data[1..end]),
+
+
+                        // TODO: Fix errors in extract of utf16 strings (every other character is chinese, I think only half the string is there)
+                            // NOTE: It also seems like the "tag size" field indicates the number of characters, not the number of bytes (though I don't have anything to prove this)
+                            // NOTE: We can somewhat deal with this by using the ID3v1 tags, but it's not a perfect solution
+                        StringType::UTF16 | StringType::UTF16be | StringType::UTF16le => {
+                            let mut utf16_buf = Vec::new();
+                            let buf = &data[1..end];
+
+                            let swap = buf[0] == 0xff && buf[1] == 0xfe;
+                            for i in 1..(buf.len() / 2) {
+                                let val = if swap {
+                                        let fst_byte = (buf[i+1] as u16) & 0xff;
+                                        let snd_byte = (buf[i] as u16) & 0xff;
+                                        (fst_byte << 8) | snd_byte
+                                    } else {
+                                        let fst_byte = (buf[i] as u16) & 0xff;
+                                        let snd_byte = (buf[i+1] as u16) & 0xff;
+                                        (fst_byte << 8) | snd_byte
+                                    };
+
+                                utf16_buf.push(val);
+                            }
+
+                            match String::from_utf16(&utf16_buf) {
+                                Ok(s) => s,
+                                Err(_) => return Err(Error::new(ErrorKind::InvalidData, "Failed to convert string from utf16"))
+                            }
+                        },
+                        _ => match str::from_utf8(&data[1..end]) {
+                            Ok(s) => s.to_string(),
+                            Err(_) => return Err(Error::new(ErrorKind::InvalidData, "Failed to convert string from utf8"))
+                        }
+                    };
+
+                    SubClass::Text(text, encoding)
+                }
             },
 
             // Comments
-            "COMM" => (SubClass::Unknown, 0),
+            "COMM" => SubClass::Unknown,
 
             // Picture
-            "APIC" => (SubClass::Unknown, 0),
-            "PIC" => (SubClass::Unknown, 0),
+            "APIC" => SubClass::Unknown,
+            "PIC" => SubClass::Unknown,
 
             // Relative Volume Adjustment
-            "RVA2" => (SubClass::Unknown, 0),
+            "RVA2" => SubClass::Unknown,
 
             // Unique File Identifier
-            "UFID" => (SubClass::Unknown, 0),
+            "UFID" => SubClass::Unknown,
 
             // General Encapsulated Object
-            "GEOB" => (SubClass::Unknown, 0),
+            "GEOB" => SubClass::Unknown,
 
             // URL
-            _url if first_char == 'W' => (SubClass::Unknown, 0),
+            _url if first_char == 'W' => SubClass::Unknown,
 
             // Lyrics
-            "USLT" => (SubClass::Unknown, 0),
-            "SYLT" => (SubClass::Unknown, 0),
+            "USLT" => SubClass::Unknown,
+            "SYLT" => SubClass::Unknown,
 
             // Event timing
-            "ETCO" => (SubClass::Unknown, 0),
+            "ETCO" => SubClass::Unknown,
 
             // Popularimeter
-            "POPM" => (SubClass::Unknown, 0),
+            "POPM" => SubClass::Unknown,
 
             // Private
-            "PRIV" => (SubClass::Unknown, 0),
+            "PRIV" => SubClass::Unknown,
 
             // Ownership
-            "OWNE" => (SubClass::Unknown, 0),
+            "OWNE" => SubClass::Unknown,
 
             // Chapter
-            "CHAP" => (SubClass::Unknown, 0),
+            "CHAP" => SubClass::Unknown,
 
             // Table of Contents
-            "CTOC" => (SubClass::Unknown, 0),
+            "CTOC" => SubClass::Unknown,
 
             // Podcast
-            "PCST" => (SubClass::Unknown, 0),
+            "PCST" => SubClass::Unknown,
 
             // Unknown
-            _ => (SubClass::Unknown, 0)
+            _ => SubClass::Unknown
         };
 
-        Ok(Some(Frame{ size: size, frame_id: frame_header.frame_id, sub: subclass }))
+        Ok(Some(frame))
     }
 
     fn field_data(buf: &[u8], header: &Header) -> Result<Vec<u8>, Error> {
         let header_size = sizeof_frame_header(header.version) as usize;
 
-        let mut offset = header_size + 1;
+        let mut offset = header_size;
         let mut len = header.size as usize;
 
         if header.compression || header.data_length_indicator {
@@ -237,13 +278,27 @@ impl Frame {
             return Err(Error::new(ErrorKind::Other, "Compressed frames not currently supported"));
         }
 
-        let end = min(buf.len() - 1, offset+len);
-        let data = buf[offset..end].to_vec();
-        Ok(data)
+        let end = min(buf.len(), offset+len);
+        Ok(buf[offset..end].to_vec())
     }
 }
 
-enum StringType {
+fn valid_frame_id(buf: &[u8]) -> bool {
+    if buf.len() != 4 {
+        return false;
+    }
+
+    for byte in buf {
+        if (*byte < 'A' as u8 || *byte > 'Z' as u8) && (*byte < '0' as u8 || *byte > '9' as u8) {
+            return false;
+        }
+    }
+
+    true
+}
+
+#[derive(Debug, Clone)]
+pub enum StringType {
     Latin1 = 0,
     UTF16 = 1,
     UTF16be = 2,
@@ -265,9 +320,9 @@ impl From<u8> for StringType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum SubClass {
-    Text(String),
+    Text(String, StringType),
     Uint(u64),
     Unknown
 }
