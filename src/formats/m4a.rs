@@ -11,6 +11,7 @@ use std::{str, u32};
 use byteorder::{BigEndian, ByteOrder};
 
 use super::meta;
+use super::utils;
 
 struct Properties;
 
@@ -86,18 +87,6 @@ fn read_tag(moov_index: usize, atoms: &Vec<Atom>, file: &mut fs::File) -> Option
     None
 }
 
-// Tag names are presented in ascii, but rust has no defined way of extracting them
-fn from_ascii(buf: &[u8]) -> String {
-    let mut s = "".to_owned();
-
-    for c in buf {
-        let c = *c as char;
-        s.push(c);
-    }
-
-    s
-}
-
 // TODO: I need someone else to comment this stuff because I don't know the formats
 fn read_atom(file: &mut fs::File) -> Result<Atom, Error> {
     let mut buf: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 0];
@@ -115,7 +104,7 @@ fn read_atom(file: &mut fs::File) -> Result<Atom, Error> {
         return Err(Error::new(ErrorKind::InvalidData, "Mp4: Invalid Atom Size"));
     }
 
-    let name = from_ascii(&buf[4..]);
+    let name = utils::from_ascii(&buf[4..]);
     if name == "meta" {
         file.seek(SeekFrom::Current(4))?;
     } else if name == "stsd" {
@@ -123,8 +112,7 @@ fn read_atom(file: &mut fs::File) -> Result<Atom, Error> {
     }
 
     let mut children = Vec::new();
-    let containers: HashSet<&str> =
-        [ "moov", "udta", "mdia", "meta", "ilst", "stbl", "minf", "moof", "traf", "trak", "stsd" ].iter().cloned().collect();
+    let containers: HashSet<&str> = [ "moov", "udta", "mdia", "meta", "ilst", "stbl", "minf", "moof", "traf", "trak", "stsd" ].iter().cloned().collect();
     if containers.contains(name.as_str()) {
         while let Ok(atom) = read_atom(file) {
             children.push(atom);
@@ -279,7 +267,7 @@ fn parseFreeForm(len: &u64, children: &Vec<Atom>, file: &mut fs::File) -> Result
                 }
 
             } else {
-                strs.push(from_ascii(str_buf).to_owned());
+                strs.push(utils::from_ascii(str_buf).to_owned());
             }
         }
 
@@ -317,7 +305,7 @@ fn parseData(len: &u64, _children: &Vec<Atom>, file: &mut fs::File, expected_fla
             return Err(Error::new(ErrorKind::InvalidData, "Mp4 atom is too short"));
         }
 
-        let name = from_ascii(&buf[(offset+4)..(offset+8)]);
+        let name = utils::from_ascii(&buf[(offset+4)..(offset+8)]);
         let flags = BigEndian::read_u32(&buf[(offset+8)..(offset+12)]);
 
         if free_form && iter < 2 {

@@ -1,5 +1,6 @@
 
 use super::tag;
+use formats::utils;
 
 use std::cmp::min;
 use std::convert;
@@ -23,7 +24,7 @@ impl Frame {
                 return Err(Error::new(ErrorKind::Other, "Frame ID not specified"));
             }
 
-            header.frame_id = from_ascii(&buf[0..3]);
+            header.frame_id = utils::from_ascii(&buf[0..3]);
             header.size = if buf.len() < 6 {
                 0
             } else {
@@ -37,7 +38,7 @@ impl Frame {
                 return Err(Error::new(ErrorKind::Other, "Frame ID not specified"));
             }
 
-            header.frame_id = from_ascii(&buf[0..4]);
+            header.frame_id = utils::from_ascii(&buf[0..4]);
             if buf.len() >= 10 {
                 header.size = BigEndian::read_u32(&buf[4..8]) as u64;
 
@@ -55,14 +56,15 @@ impl Frame {
                 return Err(Error::new(ErrorKind::Other, "Frame ID not specified"));
             }
 
-            header.frame_id = from_ascii(&buf[0..4]);
+            header.frame_id = utils::from_ascii(&buf[0..4]);
 
             if buf.len() >= 10 {
                 header.size = tag::synch::int_from_buf(&buf[4..8]) as u64;
 
                 // itunes hacks
-                // // iTunes writes v2.4 tags with v2.3-like frame sizes
+                // iTunes writes v2.4 tags with v2.3-like frame sizes
                 if header.size > 127 {
+                    // TODO: This currently causes issues with "index out-of-range" errors
                     // let frame_start = (header.size + 10) as usize;
                     // if !valid_frame_id(&buf[frame_start..(frame_start + 4)]) {
                     //     let size = BigEndian::read_u32(&buf[4..8]) as usize;
@@ -87,8 +89,6 @@ impl Frame {
         Ok(header)
     }
 
-    // TODO: This doesn't consider the "buffer" start may be at a different spot in the vector (doesn't account for pos)
-    // TODO: This doesn't return the size of the frame data in the frame struct (which is expected by the calling code)
     pub(crate) fn from_buffer(buf: &mut [u8], header: &tag::TagHeader) -> Result<Option<Frame>, Error> {
         let version = header.major_version;
         let mut frame_header = Frame::get_header(buf, version)?;
@@ -148,7 +148,7 @@ impl Frame {
                 let data = Frame::field_data(buf, &frame_header)?;
 
                 if data.len() < 2 {
-                    SubClass::Text("".to_string(), StringType::UTF16)      // There's nothing there to parse
+                    SubClass::Text("".to_string(), StringType::UTF16)
 
                 } else {
                     let encoding = StringType::from(data[0]);
@@ -172,7 +172,7 @@ impl Frame {
 
                     let end = min(len + 1, data.len());
                     let text = match encoding {
-                        StringType::Latin1 => from_ascii(&data[1..end]),
+                        StringType::Latin1 => utils::from_ascii(&data[1..end]),
 
 
                         // TODO: Fix errors in extract of utf16 strings (every other character is chinese, I think only half the string is there)
@@ -395,18 +395,6 @@ impl Header {
             _ => true
         }
     }
-}
-
-// This is a duplicate of a function declared in m4a.rs
-fn from_ascii(buf: &[u8]) -> String {
-    let mut s = "".to_owned();
-
-    for c in buf {
-        let c = *c as char;
-        s.push(c);
-    }
-
-    s
 }
 
 pub fn sizeof_frame_header(version: u8) -> u64 {

@@ -2,6 +2,7 @@
 #![allow(unused_imports)]
 
 use formats::meta;
+use formats::utils;
 use super::frame;
 
 use std::collections::HashMap;
@@ -123,20 +124,18 @@ impl Tag {
         file.read_exact(&mut block)?;
 
         let mut tag = Tag{ frame_map: HashMap::new() };
-        // from_ascii(&block[3..33]);
 
         use self::frame::StringType;
-
-        tag.frame_map.insert("TIT2".to_string(), frame::SubClass::Text(id3::from_ascii(&block[3..33]), StringType::UTF8));
-        tag.frame_map.insert("TPE1".to_string(), frame::SubClass::Text(id3::from_ascii(&block[33..63]), StringType::UTF8));
-        tag.frame_map.insert("TALB".to_string(), frame::SubClass::Text(id3::from_ascii(&block[63..93]), StringType::UTF8));
+        tag.frame_map.insert("TIT2".to_string(), frame::SubClass::Text(utils::from_ascii(&block[3..33]), StringType::UTF8));
+        tag.frame_map.insert("TPE1".to_string(), frame::SubClass::Text(utils::from_ascii(&block[33..63]), StringType::UTF8));
+        tag.frame_map.insert("TALB".to_string(), frame::SubClass::Text(utils::from_ascii(&block[63..93]), StringType::UTF8));
         // tag.frame_map.insert("TDRC".to_string(), frame::SubClass::Uint(&block[93..97]));
 
         if block[125] == 0 && block[126] != 0 {
-            tag.frame_map.insert("COMM".to_string(), frame::SubClass::Text(id3::from_ascii(&block[97..125]), StringType::UTF8));
+            tag.frame_map.insert("COMM".to_string(), frame::SubClass::Text(utils::from_ascii(&block[97..125]), StringType::UTF8));
             tag.frame_map.insert("TRCK".to_string(), frame::SubClass::Uint(block[126] as u64));
         } else {
-            tag.frame_map.insert("COMM".to_string(), frame::SubClass::Text(id3::from_ascii(&block[97..127]), StringType::UTF8));
+            tag.frame_map.insert("COMM".to_string(), frame::SubClass::Text(utils::from_ascii(&block[97..127]), StringType::UTF8));
         }
 
         // tag.frame_map.insert("TCON".to_string(), frame::SubClass::Uint(block[127] as u64));
@@ -318,24 +317,4 @@ pub(crate) mod synch {
 
 fn sizeof_footer() -> usize {
     10
-}
-
-
-// This is a duplicate of a function declared in m4a.rs and frame.rs
-mod id3 {
-    pub fn from_ascii(buf: &[u8]) -> String {
-        let idx =
-            if let Some(idx) = buf.iter().rposition(|x| (*x as char).is_alphanumeric()) {
-                idx + 1
-            } else {
-                buf.len()
-            };
-
-        let mut s = "".to_string();
-        for c in &buf[0..idx] {
-            s.push(*c as char);
-        }
-
-        s
-    }
 }

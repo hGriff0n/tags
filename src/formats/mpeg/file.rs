@@ -50,7 +50,6 @@ impl meta::File for File {
 fn find_mpeg_tags(file: &mut fs::File) -> Result<Vec<(Id3Version, u64)>, Error> {
     let mut tags = Vec::new();
 
-    // Are all of the tags possible on one file ?
     if let Some(location) = find_id3v2(file)? {
         tags.push((Id3Version::ID3v2, location));
     }
