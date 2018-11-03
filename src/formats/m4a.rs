@@ -62,29 +62,29 @@ impl meta::File for File {
     }
 }
 
-// TODO: I feel this can be vastly simplified (and still satisfy the borrow checker)
 // Tag is at "moov" > "udta" > "meta" > "ilst"
 fn read_tag(moov_index: usize, atoms: &Vec<Atom>, file: &mut fs::File) -> Option<Tag> {
-    let Atom::Atom(_, _, _, udta_atoms) = atoms.get(moov_index).unwrap();
-    let udta = udta_atoms.iter().position(|Atom::Atom(_, _, name, _)| name == "udta");
+    // Extract the `udta` sub-atom
+    atoms.get(moov_index).and_then(|Atom::Atom(_, _, _, udta_atoms)|
+        udta_atoms.iter().position(|Atom::Atom(_, _, name, _)| name == "udta")
+            .and_then(|udta_index| udta_atoms.get(udta_index)
 
-    if let Some(udta_index) = udta {
-        let Atom::Atom(_, _, _, meta_atoms) = udta_atoms.get(udta_index).unwrap();
-        let meta = meta_atoms.iter().position(|Atom::Atom(_, _, name, _)| name == "meta");
+                // Extract the `meta` sub-atom
+                .and_then(|Atom::Atom(_, _, _, meta_atoms)|
+                    meta_atoms.iter().position(|Atom::Atom(_, _, name, _)| name == "meta")
+                        .and_then(|meta_index| meta_atoms.get(meta_index)
 
-        if let Some(meta_index) = meta {
-            let Atom::Atom(_, _, _, ilst_atoms) = meta_atoms.get(meta_index).unwrap();
-
-            // For some reason, using the same "formula" doesn't find the ilst tag
-            for Atom::Atom(_, _, name, atoms) in ilst_atoms {
-                if name == "ilst" {
-                    return Tag::from_atom(atoms, file).ok();
-                }
-            }
-        }
-    }
-
-    None
+                            // Extract the `ilst` sub-atom
+                            .and_then(|Atom::Atom(_, _, _, ilst_atoms)|
+                                ilst_atoms.iter().position(|Atom::Atom(_, _, name, _)| name == "ilst")
+                                    .and_then(|ilst_index| ilst_atoms.get(ilst_index)
+                                        .and_then(|Atom::Atom(_, _, _, atoms)| Tag::from_atom(atoms, file).ok())
+                                    )
+                            )
+                        )
+                )
+            )
+    )
 }
 
 // TODO: I need someone else to comment this stuff because I don't know the formats
@@ -225,7 +225,7 @@ fn parseString(len: &u64, children: &Vec<Atom>, file: &mut fs::File) -> Result<m
                 .map(|buf| str::from_utf8(&buf.1)
                     .and_then(|s| Ok(s.to_owned())))
                 .filter(|r| r.is_ok())
-                .map(|r| r.unwrap()))
+                .map(|r| r.unwrap_or("".to_string())))
                 .join(", ");
 
             meta::TagData::Str(strs)
@@ -246,7 +246,7 @@ fn parseGenre(len: &u64, children: &Vec<Atom>, file: &mut fs::File) -> Result<me
             meta::TagData::Empty
         } else {
             let index = BigEndian::read_u16(&buf[0].1[0..2]) as usize;
-            meta::TagData::Str(meta::GENRE_LIST.get(index - 1).unwrap().to_string())
+            meta::TagData::Str(meta::GENRE_LIST.get(index - 1).unwrap_or(&"").to_string())
         };
 
     Ok(ret)
@@ -257,7 +257,7 @@ fn parseFreeForm(len: &u64, children: &Vec<Atom>, file: &mut fs::File) -> Result
 
     if buf.len() > 2 {
         let data_type = buf[2].0;
-        let name = format!("----:{}:{}", str::from_utf8(&buf[0].1).unwrap(), str::from_utf8(&buf[1].1).unwrap());
+        let name = format!("----:{}:{}", str::from_utf8(&buf[0].1).expect("Failed to parse string as utf-8"), str::from_utf8(&buf[1].1).expect("Failed to parse string as utf-8"));
 
         let mut strs = Vec::new();
         for (_, str_buf) in &buf[2..] {

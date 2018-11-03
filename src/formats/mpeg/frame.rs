@@ -102,7 +102,7 @@ impl Frame {
         }
 
         // iTunes hacks
-        let last_char = frame_header.frame_id.chars().last().unwrap();
+        let last_char = frame_header.frame_id.chars().last().unwrap_or('a');
         if version == 3 && frame_header.frame_id.len() == 4 && last_char == '\0' {
             frame_header.frame_id.pop();
             frame_header.update(2);
@@ -141,7 +141,7 @@ impl Frame {
         }
 
         // Extract the frame subclass information
-        let first_char = frame_header.frame_id.chars().next().unwrap();
+        let first_char = frame_header.frame_id.chars().next().unwrap_or('\0');
         frame.sub = match frame_header.frame_id.as_str() {
             // Text frames
             tag if first_char == 'T' || tag == "WFED" || tag == "MVNM" || tag == "MVIN" => {
@@ -283,6 +283,7 @@ impl Frame {
     }
 }
 
+#[allow(dead_code)]
 fn valid_frame_id(buf: &[u8]) -> bool {
     if buf.len() != 4 {
         return false;
